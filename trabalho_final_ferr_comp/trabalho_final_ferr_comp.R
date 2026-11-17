@@ -348,3 +348,260 @@ cores_area <- c("Astronomia/Física" = "#2a78d6", "Química" = "#eb6834")
 # PARTE 3. ANÁLISES ESTATÍSTICAS
 # Cole o seu bloco (P1, P2, P3 ou P4) abaixo da última linha.
 # ==========================================================================
+
+
+# ==========================================================================
+# P2. Bolsa de produtividade em pesquisa (PQ) do CNPq
+# Perguntas: (a) a proporção de docentes com bolsa PQ aumenta com a nota do
+#            programa? (b) na mesma nota, ela difere entre as áreas?
+#            (c) o aumento com a nota é igual nas duas áreas?
+# Responsável: [nome]
+#
+# Cole este bloco abaixo da última linha de trabalho_final_ferr_comp.R.
+# Usa da PARTE 2: con, pasta_figuras, pasta_tabelas, nome_livre(), fmt(),
+# rotulo_area(), nota_categoria(), cores_area.
+# Ano de referência: 2024 (2021 a 2023 entram só no gráfico de evolução).
+#
+# Unidade de análise: a nota é um atributo do programa, e docentes do mesmo
+# programa tendem a se parecer. Por isso o modelo é ajustado sobre os
+# programas (bolsistas e não bolsistas de cada um), com família
+# quasibinomial, que corrige os erros-padrão pela variação entre programas.
+# ==========================================================================
+
+#* P2.1 Consulta: um docente por área e ano --------------------------------
+# Sem programas novos (conceito "A"). Quem atua em mais de um programa da
+# mesma área no mesmo ano conta uma vez, no programa de nota mais alta.
+
+p2_docentes <- dbGetQuery(con, "
+  SELECT DISTINCT ON (d.ano, a.nm_area, d.id_pessoa)
+         d.ano, a.nm_area, d.id_pessoa, p.id_prog, p.nota, d.bolsa_pq
+  FROM sucupira.tab_docente d
+  JOIN sucupira.ref_programa p ON d.programa_id = p.id_prog
+  JOIN sucupira.ref_area a     ON p.area_id = a.id_area
+  WHERE p.nota <> 'A'
+  ORDER BY d.ano, a.nm_area, d.id_pessoa, p.nota DESC;") %>%
+  mutate(area = rotulo_area(nm_area),
+         nota = nota_categoria(nota),
+         pq = !is.na(bolsa_pq),
+         # nível 1 = 1A, 1B, 1C, 1D e SR (sênior)
+         nivel_pq = factor(case_when(is.na(bolsa_pq) ~ "Sem bolsa",
+                                     bolsa_pq == "2" ~ "Nível 2",
+                                     TRUE ~ "Nível 1"),
+                           levels = c("Nível 1", "Nível 2", "Sem bolsa")))
+
+p2_doc24 <- filter(p2_docentes, ano == 2024)
+count(p2_doc24, area, nivel_pq)
+
+
+#* P2.2 Bolsistas por programa e por área e nota (2024) --------------------
+
+# Uma linha por programa: docentes, bolsistas e percentual de bolsistas
+p2_prog <- p2_doc24 %>%
+  group_by(id_prog, area, nota) %>%
+  summarise(docentes = n(), bolsistas = sum(pq),
+            .groups = "drop") %>%
+  mutate(pct = 100 * bolsistas / docentes)
+
+# Variação entre programas da mesma área
+p2_prog %>%
+  group_by(area) %>%
+  summarise(programas = n(), minimo = min(pct), q1 = quantile(pct, 0.25),
+            mediana = median(pct), q3 = quantile(pct, 0.75), maximo = max(pct))
+
+# Percentual do conjunto de docentes de cada área e nota
+p2_conj <- p2_prog %>%
+  group_by(area, nota) %>%
+  summarise(programas = n(), docentes = sum(docentes),
+            bolsistas = sum(bolsistas), .groups = "drop") %>%
+  mutate(pct = 100 * bolsistas / docentes)
+p2_conj
+
+write_csv(p2_conj, nome_livre(pasta_tabelas, "P2_pq_por_area_e_nota_2024", "csv"))
+
+
+#* P2.3 Regressão logística sobre os programas (2024) ----------------------
+# Resposta: bolsistas e não bolsistas de cada programa.
+# exp(coeficiente) = razão de chances (odds ratio) em relação à referência
+# (Astronomia/Física, nota 4), mantida a outra variável fixa.
+# family = quasibinomial: mesmas razões de chances da regressão logística
+# comum, com erros-padrão multiplicados pela raiz da dispersão (variação
+# entre programas além da esperada pelo acaso binomial).
+
+p2_dados_mod <- p2_prog %>%
+  mutate(nota_num = as.integer(substr(as.character(nota), 1, 1)),
+         nota = relevel(nota, ref = "4"), area = factor(area))
+
+p2_modelo <- glm(
+  cbind(bolsistas, docentes - bolsistas) ~ area + nota,
+  family = quasibinomial, data = p2_dados_mod)
+summary(p2_modelo)
+
+p2_razoes <- tibble(termo = names(coef(p2_modelo)),
+                    razao_chances = exp(coef(p2_modelo)),
+                    ic95_inf = exp(confint.default(p2_modelo)[, 1]),
+                    ic95_sup = exp(confint.default(p2_modelo)[, 2]),
+                    p_valor = summary(p2_modelo)$coefficients[, 4])
+p2_razoes
+
+# Nota como tendência linear: razão de chances por ponto de nota
+p2_tendencia <- glm(
+  cbind(bolsistas, docentes - bolsistas) ~ area + nota_num,
+  family = quasibinomial, data = p2_dados_mod)
+exp(cbind(coef(p2_tendencia), confint.default(p2_tendencia)))
+
+# O aumento com a nota é igual nas duas áreas? Testes F da interação,
+# com a nota em categorias (4 parâmetros) e como tendência (1 parâmetro).
+p2_inter_cat <- glm(
+  cbind(bolsistas, docentes - bolsistas) ~ area * nota,
+  family = quasibinomial, data = p2_dados_mod)
+p2_teste_cat <- anova(p2_modelo, p2_inter_cat, test = "F")
+p2_inter_lin <- glm(
+  cbind(bolsistas, docentes - bolsistas) ~ area * nota_num,
+  family = quasibinomial, data = p2_dados_mod)
+p2_teste_lin <- anova(p2_tendencia, p2_inter_lin, test = "F")
+p2_teste_cat; p2_teste_lin
+
+# Razão de chances por ponto de nota em cada área (modelo com interação)
+p2_b <- coef(p2_inter_lin)
+# (o último coeficiente é o termo de interação área x nota_num)
+p2_por_ponto <- c("Astronomia/Física" = exp(unname(p2_b["nota_num"])),
+                  "Química" = exp(unname(p2_b["nota_num"] + tail(p2_b, 1))))
+p2_por_ponto
+
+write_csv(p2_razoes,
+          nome_livre(pasta_tabelas, "P2_razoes_de_chance_quasibinomial", "csv"))
+write_csv(tibble(
+  item = c("dispersao (modelo area + nota)",
+           "razao de chances por ponto de nota",
+           "interacao area x nota (categorias): p",
+           "interacao area x nota (tendencia): p",
+           "razao por ponto, Astronomia/Fisica",
+           "razao por ponto, Quimica"),
+  valor = c(summary(p2_modelo)$dispersion,
+            exp(coef(p2_tendencia)["nota_num"]),
+            p2_teste_cat$`Pr(>F)`[2], p2_teste_lin$`Pr(>F)`[2],
+            p2_por_ponto)),
+  nome_livre(pasta_tabelas, "P2_tendencia_e_interacao", "csv"))
+
+
+#* P2.4 Gráficos -----------------------------------------------------------
+
+p2_tema <- theme_minimal(base_size = 12) +
+  theme(legend.position = "top", legend.justification = "left",
+        panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(color = "grey90"),
+        plot.title = element_text(face = "bold"),
+        plot.subtitle = element_text(color = "grey30"),
+        plot.caption = element_text(color = "grey40", hjust = 0, size = 9),
+        plot.title.position = "plot", plot.caption.position = "plot")
+
+p2_n <- p2_prog %>%
+  group_by(area) %>% summarise(prog = n(), doc = sum(docentes))
+p2_rodape <- paste0(
+  "Astronomia/Física: ", p2_n$prog[1], " programas e ", p2_n$doc[1],
+  " docentes; Química: ", p2_n$prog[2], " programas e ", p2_n$doc[2],
+  " docentes (2024, conceito A excluído).")
+
+# Gráfico 1: cada ponto é um programa; o traço horizontal é o percentual do
+# conjunto de docentes daquela área e nota.
+p2_subtitulo <- paste("Ponto: um programa. Traço: percentual do",
+                      "conjunto da área e da nota (2024)")
+p2_rodape_g1 <- paste0(
+  p2_rodape, "\nEm 2024, \"3 ou menos\" contém só programas de nota 3. ",
+  "Fonte: CAPES, Dados Abertos (Sucupira).")
+p2_espalha <- position_jitterdodge(jitter.width = 0.18,
+                                   dodge.width = 0.7, seed = 1)
+
+p2_g1 <- ggplot(p2_prog, aes(x = nota, y = pct, color = area)) +
+  geom_point(position = p2_espalha, size = 1.9, alpha = 0.55) +
+  geom_errorbar(data = p2_conj, aes(ymin = pct, ymax = pct),
+                position = position_dodge(width = 0.7),
+                width = 0.55, linewidth = 1.1) +
+  scale_color_manual(values = cores_area, name = NULL) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"),
+                     limits = c(0, 100), breaks = seq(0, 100, 20)) +
+  labs(title = "Docentes com bolsa PQ por nota do programa",
+       subtitle = p2_subtitulo,
+       x = "Nota do programa (Quadrienal 2017 a 2020)", y = NULL,
+       caption = p2_rodape_g1) +
+  p2_tema
+
+p2_g1
+
+ggsave(nome_livre(pasta_figuras, "P2_pq_por_nota_programas", "pdf"), p2_g1,
+       width = 7.5, height = 4.8, device = cairo_pdf)
+ggsave(nome_livre(pasta_figuras, "P2_pq_por_nota_programas", "png"), p2_g1,
+       width = 7.5, height = 4.8, dpi = 300, bg = "white")
+
+# Gráfico 2: composição por nível da bolsa em cada nota (barras de 100%).
+# Categoria ordenada: tons de cinza do mais escuro (nível 1) ao mais claro.
+p2_comp <- p2_doc24 %>%
+  count(area, nota, nivel_pq) %>%
+  group_by(area, nota) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+write_csv(p2_comp, nome_livre(pasta_tabelas, "P2_composicao_nivel_pq_2024", "csv"))
+
+p2_g2 <- ggplot(p2_comp, aes(x = nota, y = pct, fill = fct_rev(nivel_pq))) +
+  geom_col(width = 0.72, color = "white", linewidth = 0.6) +
+  geom_text(aes(label = if_else(pct >= 6, paste0(fmt(pct, 0), "%"), ""),
+                color = nivel_pq == "Nível 1", group = fct_rev(nivel_pq)),
+            position = position_stack(vjust = 0.5), size = 3.1,
+            show.legend = FALSE) +
+  scale_color_manual(values = c("TRUE" = "white", "FALSE" = "grey15"),
+                     guide = "none") +
+  scale_fill_manual(values = c("Nível 1" = "#3d3d3a", "Nível 2" = "#8f8e87",
+                               "Sem bolsa" = "#dcdbd5"),
+                    breaks = c("Nível 1", "Nível 2", "Sem bolsa"), name = NULL) +
+  facet_wrap(~ area) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"),
+                     expand = expansion(mult = c(0, 0.02))) +
+  labs(title = "Nível da bolsa de produtividade por nota do programa",
+       subtitle = "Composição dos docentes de cada nota (2024)",
+       x = "Nota do programa", y = NULL,
+       caption = paste0(p2_rodape, "\nNível 1 inclui 1A a 1D e sênior (SR). ",
+                        "Fonte: CAPES, Dados Abertos (Sucupira).")) +
+  p2_tema +
+  theme(strip.text = element_text(face = "bold", size = 12, hjust = 0))
+
+p2_g2
+
+ggsave(nome_livre(pasta_figuras, "P2_nivel_pq_por_nota", "pdf"), p2_g2,
+       width = 8.5, height = 4.8, device = cairo_pdf)
+ggsave(nome_livre(pasta_figuras, "P2_nivel_pq_por_nota", "png"), p2_g2,
+       width = 8.5, height = 4.8, dpi = 300, bg = "white")
+
+# Gráfico 3: percentual de bolsistas em cada ano, todas as notas juntas.
+p2_evolucao <- p2_docentes %>%
+  group_by(ano, area) %>%
+  summarise(n = n(), bolsistas = sum(pq), .groups = "drop") %>%
+  mutate(pct = 100 * bolsistas / n)
+
+write_csv(p2_evolucao, nome_livre(pasta_tabelas, "P2_evolucao_pq_2021_2024", "csv"))
+
+p2_g3 <- ggplot(p2_evolucao, aes(x = ano, y = pct, color = area)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  geom_text(data = filter(p2_evolucao, ano == max(ano)),
+            aes(label = area), hjust = 0, nudge_x = 0.08, size = 3.6,
+            show.legend = FALSE) +
+  scale_color_manual(values = cores_area, guide = "none") +
+  scale_x_continuous(breaks = 2021:2024,
+                     expand = expansion(add = c(0.2, 1.1))) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"),
+                     limits = c(0, max(p2_evolucao$pct) * 1.25),
+                     expand = expansion(mult = c(0, 0))) +
+  labs(title = "Docentes com bolsa de produtividade, 2021 a 2024",
+       subtitle = "Percentual dos docentes de cada área, todas as notas",
+       x = NULL, y = NULL,
+       caption = "Docentes distintos por ano e área; conceito A excluído.\nFonte: CAPES, Dados Abertos (Sucupira).") +
+  p2_tema
+
+p2_g3
+
+ggsave(nome_livre(pasta_figuras, "P2_evolucao_pq", "pdf"), p2_g3,
+       width = 7.5, height = 4.5, device = cairo_pdf)
+ggsave(nome_livre(pasta_figuras, "P2_evolucao_pq", "png"), p2_g3,
+       width = 7.5, height = 4.5, dpi = 300, bg = "white")
